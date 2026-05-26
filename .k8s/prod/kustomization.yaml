@@ -1,0 +1,110 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orders-prod
+
+resources:
+  - ../base
+  # PDB só faz sentido em prod, onde temos múltiplas replicas
+  - pdb.yaml
+
+namePrefix: prod-
+
+labels:
+  - pairs:
+      environment: prod
+    includeSelectors: false
+
+# Sobrescreve a imagem base com o ACR de prod
+images:
+  - name: orders-api
+    newName: atlasprod.azurecr.io/orders-api
+    newTag: latest
+
+patches:
+  # ── Deployment: mais replicas, resources maiores, Production ──
+  - target:
+      kind: Deployment
+      name: orders-api
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: orders-api
+      spec:
+        replicas: 3
+        template:
+          spec:
+            # Spread entre zonas de disponibilidade
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: DoNotSchedule
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: orders-api
+            containers:
+              - name: orders-api
+                env:
+                  - name: ASPNETCORE_ENVIRONMENT
+                    value: "Production"
+                resources:
+                  requests:
+                    cpu: 250m
+                    memory: 256Mi
+                  limits:
+                    cpu: "1"
+                    memory: 512Mi
+
+  # ── HPA: escala de produção ──
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: orders-api
+    patch: |
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: orders-api
+      spec:
+        minReplicas: 3
+        maxReplicas: 10
+
+  # ── Ingress: hostname de produção + TLS ──
+  - target:
+      kind: Ingress
+      name: orders-api
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: orders-api
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+      spec:
+        tls:
+          - hosts:
+              - orders-api.atlas.io
+            secretName: orders-api-tls
+        rules:
+          - host: orders-api.atlas.io
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: orders-api
+                      port:
+                        name: http
+
+  # ── ConfigMap: environment = Production ──
+  - target:
+      kind: ConfigMap
+      name: orders-api-config
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: orders-api-config
+      data:
+        ASPNETCORE_ENVIRONMENT: "Production"

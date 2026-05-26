@@ -1,0 +1,19 @@
+# Secrets / variáveis locais
+.env
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# .NET
+bin/
+obj/
+*.user

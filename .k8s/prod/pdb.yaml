@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orders-api
+  labels:
+    app.kubernetes.io/name: orders-api
+spec:
+  # Garante que pelo menos 1 pod esteja sempre disponível durante
+  # drains, upgrades de node, ou disruptions voluntárias.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orders-api

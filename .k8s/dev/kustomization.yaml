@@ -1,0 +1,95 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orders-dev
+
+resources:
+  - ../base
+
+# Prefixo para evitar colisão entre ambientes no mesmo cluster
+namePrefix: dev-
+
+labels:
+  - pairs:
+      environment: dev
+    includeSelectors: false
+
+# Sobrescreve a imagem base com o ACR de dev
+images:
+  - name: orders-api
+    newName: atlasdev.azurecr.io/orders-api
+    newTag: latest
+
+patches:
+  # ── Deployment: menos replicas, environment = Development ──
+  - target:
+      kind: Deployment
+      name: orders-api
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: orders-api
+      spec:
+        replicas: 1
+        template:
+          spec:
+            containers:
+              - name: orders-api
+                env:
+                  - name: ASPNETCORE_ENVIRONMENT
+                    value: "Development"
+                resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+                  limits:
+                    cpu: 250m
+                    memory: 128Mi
+
+  # ── HPA: escala reduzida para dev ──
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: orders-api
+    patch: |
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: orders-api
+      spec:
+        minReplicas: 1
+        maxReplicas: 3
+
+  # ── Ingress: hostname de dev ──
+  - target:
+      kind: Ingress
+      name: orders-api
+    patch: |
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: orders-api
+      spec:
+        rules:
+          - host: orders-api.dev.atlas.internal
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: orders-api
+                      port:
+                        name: http
+
+  # ── ConfigMap: environment = Development ──
+  - target:
+      kind: ConfigMap
+      name: orders-api-config
+    patch: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: orders-api-config
+      data:
+        ASPNETCORE_ENVIRONMENT: "Development"

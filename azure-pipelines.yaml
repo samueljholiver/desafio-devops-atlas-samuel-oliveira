@@ -1,0 +1,153 @@
+# ============================================================
+# Azure DevOps — CI/CD Pipeline
+# orders-api: Build → Push (ACR) → Deploy (AKS via Kustomize)
+# ============================================================
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none   # Não executa em PRs (somente push na main)
+
+# ── Variáveis ────────────────────────────────────────────────
+# Variáveis sensíveis vêm de Variable Groups linkados ao Key Vault,
+# nunca hardcoded neste YAML.
+variables:
+  - group: orders-api-keyvault   # Variable Group ligado ao Azure Key Vault
+
+  # Variáveis não-sensíveis do pipeline
+  - name: dockerfilePath
+    value: "$(Build.SourcesDirectory)/Dockerfile"
+  - name: imageRepository
+    value: "orders-api"
+  - name: acrName
+    value: "atlasprod"
+  - name: acrLoginServer
+    value: "atlasprod.azurecr.io"
+  - name: aksClusterName
+    value: "aks-atlas-prod"
+  - name: aksResourceGroup
+    value: "rg-atlas-prod"
+  - name: kustomizeOverlay
+    value: "prod"
+  - name: kubernetesNamespace
+    value: "orders-prod"
+  - name: tag
+    value: "$(Build.SourceVersion)"   # SHA do commit como tag da imagem
+
+pool:
+  vmImage: "ubuntu-latest"
+
+# ============================================================
+# Stage 1 — BUILD & PUSH (ACR)
+# ============================================================
+stages:
+  - stage: BuildAndPush
+    displayName: "🔨 Build & 📦 Push Image"
+    jobs:
+      - job: BuildAndPushJob
+        displayName: "Build, Test and Push"
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: "Instalar .NET SDK 8.0"
+            inputs:
+              packageType: "sdk"
+              version: "8.0.x"
+
+          - script: |
+              dotnet restore orders-api/orders-api.csproj
+              dotnet build orders-api/orders-api.csproj --configuration Release --no-restore
+            displayName: "dotnet build (validação)"
+
+          # Login no ACR via Service Connection
+          - task: Docker@2
+            displayName: "Login no ACR"
+            inputs:
+              command: "login"
+              containerRegistry: "acr-atlas-prod"
+
+          # Build e Push em um único passo para evitar export/import de tarball
+          - task: Docker@2
+            displayName: "Build and Push Image"
+            inputs:
+              command: "buildAndPush"
+              repository: "$(imageRepository)"
+              dockerfile: "$(dockerfilePath)"
+              containerRegistry: "acr-atlas-prod"
+              tags: |
+                $(tag)
+                latest
+
+  # ============================================================
+  # Stage 2 — DEPLOY (AKS via Kustomize)
+  # ============================================================
+  - stage: Deploy
+    displayName: "🚀 Deploy to AKS"
+    dependsOn: BuildAndPush
+    condition: succeeded()
+    jobs:
+      - deployment: DeployToAKS
+        displayName: "Deploy orders-api no AKS"
+        environment: "production"   # Environment do Azure DevOps (permite approval gates)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                # Instala kubectl
+                - task: KubectlInstaller@0
+                  displayName: "Instalar kubectl"
+                  inputs:
+                    kubectlVersion: "latest"
+
+                # Configura credenciais do AKS
+                - task: AzureCLI@2
+                  displayName: "Obter credenciais do AKS"
+                  inputs:
+                    azureSubscription: "azure-subscription-prod"   # Service Connection Azure
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(aksResourceGroup) \
+                        --name $(aksClusterName) \
+                        --overwrite-existing
+
+                # Cria o namespace se não existir
+                - script: |
+                    kubectl create namespace $(kubernetesNamespace) --dry-run=client -o yaml | kubectl apply -f -
+                  displayName: "Garantir namespace"
+
+                # Atualiza a tag da imagem no kustomize e aplica
+                - script: |
+                    # Instala kustomize
+                    curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+                    sudo mv kustomize /usr/local/bin/
+
+                    # Sobrescreve a tag da imagem com o SHA do commit
+                    cd $(Build.SourcesDirectory)/.k8s/$(kustomizeOverlay)
+                    kustomize edit set image orders-api=$(acrLoginServer)/$(imageRepository):$(tag)
+
+                    # Gera os manifests e aplica no cluster
+                    kustomize build . | kubectl apply -f - -n $(kubernetesNamespace)
+                  displayName: "Kustomize Build & Apply"
+
+                # Aguarda o rollout completar
+                - script: |
+                    kubectl rollout status deployment/prod-orders-api \
+                      -n $(kubernetesNamespace) \
+                      --timeout=300s
+                  displayName: "Aguardar rollout"
+
+                # Verifica health check do pod
+                - script: |
+                    echo "Verificando pods..."
+                    kubectl get pods -n $(kubernetesNamespace) -l app.kubernetes.io/name=orders-api
+                    echo ""
+                    echo "Verificando endpoints..."
+                    kubectl get endpoints -n $(kubernetesNamespace)
+                  displayName: "Verificação pós-deploy"

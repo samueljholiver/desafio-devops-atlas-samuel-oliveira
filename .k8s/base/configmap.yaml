@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-api-config
+  labels:
+    app.kubernetes.io/name: orders-api
+data:
+  # Valores não-sensíveis — sobrescritos por overlay de ambiente
+  ASPNETCORE_ENVIRONMENT: "Production"
